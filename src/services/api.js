@@ -1,9 +1,8 @@
 import axios from 'axios';
 
-// Đổi URL này sang URL thật của Backend khi bên đó bàn giao (ví dụ: http://localhost:5000/api)
+// Đổi port theo port thực tế mà backend chạy (ví dụ http://localhost:5000)
 const API_BASE_URL = 'http://localhost:5000/api';
 
-// Cấu hình axios instance
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
   headers: {
@@ -13,27 +12,27 @@ const apiClient = axios.create({
 });
 
 export const ticketApi = {
-  // Lấy danh sách phiếu (hỗ trợ lọc trạng thái và tìm kiếm)
-  getAllTickets: async (params) => {
-    // Khi có API thật: return (await apiClient.get('/tickets', { params })).data;
-    return null;
+  // Lấy danh sách máy cho Dashboard
+  getAllTickets: async () => {
+    const response = await apiClient.get('/tickets');
+    return response.data;
   },
 
-  // Tạo phiếu mới
+  // Tạo phiếu tiếp nhận mới & nhận mã QR
   createTicket: async (ticketData) => {
-    // Khi có API thật: return (await apiClient.post('/tickets', ticketData)).data;
-    return null;
+    const response = await apiClient.post('/tickets', ticketData);
+    return response.data;
   },
 
-  // Lấy chi tiết phiếu theo ID
+  // Tra cứu tiến độ khi quét mã QR
   getTicketById: async (id) => {
-    // Khi có API thật: return (await apiClient.get(`/tickets/${id}`)).data;
-    return null;
+    const response = await apiClient.get(`/tickets/${id}`);
+    return response.data;
   },
 
-  // Cập nhật trạng thái hoặc ghi chú sửa chữa
-  updateTicketStatus: async (id, updateData) => {
-    // Khi có API thật: return (await apiClient.patch(`/tickets/${id}`, updateData)).data;
-    return null;
-  }
+  // Kỹ thuật viên đổi trạng thái / cập nhật ghi chú
+  updateTicketStatus: async (id, data) => {
+    const response = await apiClient.patch(`/tickets/${id}`, data);
+    return response.data;
+  },
 };
