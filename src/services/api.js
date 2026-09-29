@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-// Đổi port theo port thực tế mà backend chạy (ví dụ http://localhost:5000)
+// Đổi port theo port thực tế mà backend chạy 
 const API_BASE_URL = 'http://localhost:5000/api';
 
 const apiClient = axios.create({
