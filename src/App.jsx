@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
-import { appointmentApi, authApi, ticketApi } from './services/api';
+import { authApi, devicesApi, ticketApi } from './services/api';
 import { 
   Monitor, QrCode, Search, Printer, CheckCircle2, 
   AlertCircle, Wrench, ArrowRight, Camera, 
   ListFilter, LayoutDashboard, PlusCircle, X,
-  Lock, LogIn, LogOut, Phone, ShieldCheck, CalendarDays, Clock3
+  Lock, LogIn, LogOut, Phone, ShieldCheck, Clock3
 } from 'lucide-react';
 
 const serviceTypes = [
@@ -19,24 +19,9 @@ const serviceTypes = [
   'Mạng / Kết nối',
 ];
 
-const appointmentTimes = ['08:30', '10:00', '13:30', '15:00', '16:30'];
-
-const normalizeAppointment = (appointment) => ({
-  ...appointment,
-  id: appointment.id || appointment.appointmentId || appointment.AppointmentID,
-  customerName: appointment.customerName || appointment.CustomerName,
-  phone: appointment.phone || appointment.Phone,
-  serviceType: appointment.serviceType || appointment.ServiceType,
-  deviceName: appointment.deviceName || appointment.DeviceName,
-  date: appointment.date || appointment.Date,
-  time: appointment.time || appointment.Time,
-  issueDescription: appointment.issueDescription || appointment.IssueDescription,
-  status: (appointment.status || appointment.Status || 'pending').toLowerCase(),
-});
-
 const normalizeTicket = (ticket) => ({
   ...ticket,
-  id: ticket.id || ticket.ID || ticket.ticketId || ticket.TicketID || '',
+  id: ticket.id || ticket.ID || ticket.ticketId || ticket.TicketID || ticket.DeviceID || ticket.ticketCode || ticket.TicketCode || '',
   customerName: ticket.customerName || ticket.CustomerName || '',
   phone: ticket.phone || ticket.Phone || '',
   serviceType: ticket.serviceType || ticket.ServiceType || '',
@@ -85,15 +70,15 @@ const unwrapTicketResponse = (response) => {
   const ticket = response?.ticket || response?.data?.ticket || response?.data || response || {};
   return {
     ...ticket,
-    id: ticket.id || ticket.ID || ticket.ticketId || ticket.TicketID,
-    token: ticket.token || ticket.Token || ticket.accessToken || ticket.access_token,
+    id: ticket.id || ticket.ID || ticket.ticketId || ticket.TicketID || ticket.deviceId || ticket.DeviceID || ticket.ticketCode || ticket.TicketCode,
+    token: ticket.token || ticket.Token || ticket.sessionToken || ticket.SessionToken || ticket.accessToken || ticket.access_token,
+    qrImage: ticket.qrImage || ticket.QRImage || ticket.qrCode || ticket.QRCode || ticket.QRCodeBase64,
   };
 };
 
-const getLocalDateValue = () => {
-  const date = new Date();
-  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
-  return date.toISOString().slice(0, 10);
+const getQrImageSource = (qrImage) => {
+  if (!qrImage) return '';
+  return qrImage.startsWith('data:') ? qrImage : `data:image/png;base64,${qrImage}`;
 };
 
 export default function App() {
@@ -134,30 +119,19 @@ export default function App() {
   const [formData, setFormData] = useState({
     customerName: '',
     phone: '',
+    email: '',
     serviceType: 'Phần cứng',
     deviceName: '',
     issueDescription: '',
   });
 
-  const [appointments, setAppointments] = useState([]);
-  const [isLoadingAppointments, setIsLoadingAppointments] = useState(false);
-  const [isSubmittingAppointment, setIsSubmittingAppointment] = useState(false);
-  const [updatingAppointmentId, setUpdatingAppointmentId] = useState(null);
-  const [appointmentError, setAppointmentError] = useState('');
-  const [appointmentForm, setAppointmentForm] = useState({
-    customerName: '',
-    phone: '',
-    serviceType: serviceTypes[0],
-    deviceName: '',
-    date: '',
-    time: '',
-    issueDescription: '',
-  });
-  const [submittedAppointment, setSubmittedAppointment] = useState(null);
-
   const [currentCreatedTicket, setCurrentCreatedTicket] = useState(null);
   const [isCreatingTicket, setIsCreatingTicket] = useState(false);
   const [ticketCreationError, setTicketCreationError] = useState('');
+  const [deviceForm, setDeviceForm] = useState({ customerId: '', deviceCode: '', deviceName: '', serialOrVersion: '' });
+  const [isCreatingDevice, setIsCreatingDevice] = useState(false);
+  const [deviceCreationError, setDeviceCreationError] = useState('');
+  const [createdDevice, setCreatedDevice] = useState(null);
   const [isStartingCustomerTicket, setIsStartingCustomerTicket] = useState(false);
   const [customerTicketError, setCustomerTicketError] = useState('');
   const [isSubmittingTicket, setIsSubmittingTicket] = useState(false);
@@ -229,13 +203,18 @@ export default function App() {
               }
 
               try {
-                const response = await ticketApi.getTicketById(cleanId);
-                const ticket = normalizeTicket(unwrapTicketResponse(response));
-                if (!ticket.id) throw new Error('Không tìm thấy phiếu này.');
-                setSelectedTicket(ticket);
+                const response = await devicesApi.getDeviceByCode(cleanId);
+                const device = response?.data || response || {};
+                if (!(device.DeviceID || device.deviceId)) throw new Error('Không tìm thấy thiết bị này.');
+                setSelectedTicket(normalizeTicket({
+                  ...device,
+                  id: device.DeviceID || device.deviceId,
+                  deviceCode: cleanId,
+                  isDeviceLookup: true,
+                }));
                 setActiveTab('detail');
               } catch (error) {
-                setScannerError(getFriendlyErrorMessage(error, `Không tìm thấy phiếu có mã ${cleanId}.`));
+                setScannerError(getFriendlyErrorMessage(error, `Không tìm thấy thiết bị có mã ${cleanId}.`));
               }
             },
             () => {}
@@ -253,39 +232,6 @@ export default function App() {
   }, [activeTab]);
 
   useEffect(() => {
-    if (activeTab !== 'dashboard' || !currentUser) return undefined;
-
-    let isCurrent = true;
-    const loadAppointments = async () => {
-      setIsLoadingAppointments(true);
-      setAppointmentError('');
-      try {
-        const response = await appointmentApi.getAllAppointments();
-        const appointmentList = Array.isArray(response)
-          ? response
-          : response.appointments || response.data?.appointments || response.data;
-        if (!Array.isArray(appointmentList)) {
-          throw new Error('Chưa tải được danh sách lịch hẹn. Vui lòng thử lại sau.');
-        }
-        if (isCurrent) setAppointments(appointmentList.map(normalizeAppointment));
-      } catch (error) {
-        if (isCurrent) {
-          if (error.response?.status === 404) {
-            setAppointments([]);
-            return;
-          }
-          setAppointmentError(getFriendlyErrorMessage(error, 'Chưa tải được lịch hẹn. Vui lòng thử lại sau.'));
-        }
-      } finally {
-        if (isCurrent) setIsLoadingAppointments(false);
-      }
-    };
-
-    loadAppointments();
-    return () => { isCurrent = false; };
-  }, [activeTab, currentUser]);
-
-  useEffect(() => {
     if (activeTab !== 'repairForm') return undefined;
 
     let isCurrent = true;
@@ -293,10 +239,7 @@ export default function App() {
       setTicketVerificationStatus('checking');
       setTicketVerificationError('');
       try {
-        const response = await ticketApi.verifyTicketToken({
-          token: ticketAccess.token,
-          id: ticketAccess.id,
-        });
+        const response = await ticketApi.verifyTicketToken(ticketAccess.token);
         const result = response?.data || response || {};
         const ticketData = result.ticket || result.data?.ticket || result.data || result;
         const valid = result.valid ?? result.isValid ?? result.Valid ?? result.IsValid ??
@@ -405,7 +348,7 @@ export default function App() {
   };
 
   const createTicketDraft = async () => {
-    const response = await ticketApi.createTicket({ status: 'draft' });
+    const response = await ticketApi.initSession();
     const ticketData = unwrapTicketResponse(response);
     if (!ticketData.id && !ticketData.token) {
       throw new Error('Chưa tạo được mã phiếu. Vui lòng thử lại sau.');
@@ -460,6 +403,29 @@ export default function App() {
     }
   };
 
+  const handleCreateDevice = async (e) => {
+    e.preventDefault();
+    setIsCreatingDevice(true);
+    setDeviceCreationError('');
+    setCreatedDevice(null);
+
+    try {
+      const response = await devicesApi.createDevice({
+        CustomerID: Number(deviceForm.customerId),
+        DeviceCode: deviceForm.deviceCode,
+        DeviceName: deviceForm.deviceName,
+        SerialOrVersion: deviceForm.serialOrVersion,
+      });
+      const device = unwrapTicketResponse(response);
+      if (!device.id) throw new Error('Thiết bị đã gửi nhưng phản hồi chưa có mã thiết bị.');
+      setCreatedDevice({ ...device, deviceCode: deviceForm.deviceCode });
+    } catch (error) {
+      setDeviceCreationError(getFriendlyErrorMessage(error, 'Chưa lưu được thiết bị. Vui lòng thử lại.'));
+    } finally {
+      setIsCreatingDevice(false);
+    }
+  };
+
   const handleSubmitRepairDetails = async (e) => {
     e.preventDefault();
     if (!formData.phone.match(/^[0-9]{10,11}$/)) {
@@ -474,10 +440,12 @@ export default function App() {
     setIsSubmittingTicket(true);
     setTicketSubmissionError('');
     try {
-      const response = await ticketApi.submitTicketDetails({
-        ...formData,
-        token: ticketAccess.token || undefined,
-        id: ticketAccess.id || undefined,
+      const response = await ticketApi.submitTicketDetails(ticketAccess.token, {
+        fullName: formData.customerName,
+        phone: formData.phone,
+        email: formData.email,
+        deviceName: formData.deviceName,
+        issueDescription: formData.issueDescription,
       });
       const savedTicket = unwrapTicketResponse(response);
       const submittedTicket = normalizeTicket({
@@ -497,47 +465,6 @@ export default function App() {
       setTicketSubmissionError(getFriendlyErrorMessage(error, 'Chưa gửi được thông tin sửa chữa. Vui lòng thử lại.'));
     } finally {
       setIsSubmittingTicket(false);
-    }
-  };
-
-  const handleBookAppointment = async (e) => {
-    e.preventDefault();
-    if (appointmentForm.date === getLocalDateValue()) {
-      const currentTime = new Date().toTimeString().slice(0, 5);
-      if (appointmentForm.time <= currentTime) {
-        alert('Vui lòng chọn khung giờ còn lại trong ngày hoặc chọn ngày khác.');
-        return;
-      }
-    }
-
-    setIsSubmittingAppointment(true);
-    setAppointmentError('');
-    try {
-      const response = await appointmentApi.createAppointment(appointmentForm);
-      const appointmentData = response.appointment || response.data?.appointment || response.data || response;
-      const appointment = normalizeAppointment({ ...appointmentForm, ...appointmentData });
-
-      setAppointments((currentAppointments) => [appointment, ...currentAppointments]);
-      setSubmittedAppointment(appointment);
-    } catch (error) {
-      setAppointmentError(getFriendlyErrorMessage(error, 'Chưa gửi được yêu cầu đặt lịch. Vui lòng thử lại.'));
-    } finally {
-      setIsSubmittingAppointment(false);
-    }
-  };
-
-  const handleAppointmentStatusChange = async (appointmentId, status) => {
-    setUpdatingAppointmentId(appointmentId);
-    setAppointmentError('');
-    try {
-      await appointmentApi.updateAppointment(appointmentId, { status });
-      setAppointments((currentAppointments) => currentAppointments.map((appointment) => (
-        appointment.id === appointmentId ? { ...appointment, status } : appointment
-      )));
-    } catch (error) {
-      setAppointmentError(getFriendlyErrorMessage(error, 'Chưa cập nhật được lịch hẹn. Vui lòng thử lại.'));
-    } finally {
-      setUpdatingAppointmentId(null);
     }
   };
 
@@ -598,13 +525,13 @@ export default function App() {
   });
 
   return (
-    <div className="min-h-screen bg-slate-50/70 text-slate-800 flex flex-col items-center p-4 md:p-8">
-      <div className="w-full max-w-5xl space-y-6">
+    <div className="app-root min-h-screen bg-slate-50/70 text-slate-800 flex flex-col items-center p-4 md:p-8">
+      <div className={`app-shell w-full max-w-5xl space-y-6 ${activeTab === 'lookup' ? 'app-shell-lookup' : ''}`}>
 
         {/* Header */}
-        <header className="bg-white p-4 md:px-6 md:py-4 rounded-2xl shadow-sm border border-slate-200/80 flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3.5">
-            <div className="p-2.5 bg-blue-600 text-white rounded-xl shadow-sm shadow-blue-500/20">
+        <header className="app-header bg-white p-4 md:px-6 md:py-4 rounded-2xl shadow-sm border border-slate-200/80 flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="app-brand flex items-center gap-3.5">
+            <div className="app-brand-icon p-2.5 bg-blue-600 text-white rounded-xl shadow-sm shadow-blue-500/20">
               <Monitor className="w-6 h-6" />
             </div>
             <div>
@@ -613,16 +540,18 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 bg-slate-100/80 p-1 rounded-xl text-xs md:text-sm font-medium">
-              <button
-                onClick={() => setActiveTab('lookup')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                  activeTab === 'lookup' ? 'bg-white text-blue-600 shadow-sm font-semibold' : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <Search className="w-4 h-4" /> <span>Khách tra cứu</span>
-              </button>
+          <div className="app-header-controls flex items-center gap-2">
+            <div className="app-navigation flex items-center gap-1 bg-slate-100/80 p-1 rounded-xl text-xs md:text-sm font-medium">
+              {!currentUser && (
+                <button
+                  onClick={() => setActiveTab('lookup')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                    activeTab === 'lookup' ? 'bg-white text-blue-600 shadow-sm font-semibold' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Search className="w-4 h-4" /> <span className="app-nav-label">Khách tra cứu</span>
+                </button>
+              )}
 
               <button
                 onClick={() => { setActiveTab('scan'); setScannerError(''); }}
@@ -630,7 +559,7 @@ export default function App() {
                   activeTab === 'scan' ? 'bg-white text-blue-600 shadow-sm font-semibold' : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                <Camera className="w-4 h-4" /> <span>Quét QR</span>
+                <Camera className="w-4 h-4" /> <span className="app-nav-label">Quét QR</span>
               </button>
 
               {currentUser && (
@@ -641,7 +570,7 @@ export default function App() {
                       activeTab === 'dashboard' ? 'bg-white text-blue-600 shadow-sm font-semibold' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    <LayoutDashboard className="w-4 h-4" /> <span>Dashboard</span>
+                    <LayoutDashboard className="w-4 h-4" /> <span className="app-nav-label">Quản Lý</span>
                   </button>
                   <button
                     onClick={() => setActiveTab('create')}
@@ -649,7 +578,7 @@ export default function App() {
                       activeTab === 'create' ? 'bg-white text-blue-600 shadow-sm font-semibold' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    <PlusCircle className="w-4 h-4" /> <span>Tạo phiếu</span>
+                    <PlusCircle className="w-4 h-4" /> <span className="app-nav-label">Tạo phiếu</span>
                   </button>
                 </>
               )}
@@ -741,8 +670,8 @@ export default function App() {
 
         {/* 1. Tab Khách Tra Cứu */}
         {activeTab === 'lookup' && (
-          <div className="space-y-6">
-            <div className="bg-white p-8 md:p-10 rounded-2xl shadow-sm border border-slate-200/80 text-center">
+          <div className="app-lookup-view space-y-6">
+            <div className="app-lookup-panel bg-white p-8 md:p-10 rounded-2xl shadow-sm border border-slate-200/80 text-center">
               <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Tra Cứu Tình Trạng Thiết Bị</h2>
               <p className="text-sm text-slate-500 mt-1 mb-6">
                 Nhập số điện thoại để xem toàn bộ máy đang sửa, hoặc nhập chính xác mã phiếu
@@ -769,7 +698,7 @@ export default function App() {
               </div>
 
               {/* Thanh tìm kiếm */}
-              <form onSubmit={handleCustomerLookup} className="flex gap-2.5 max-w-xl mx-auto">
+              <form onSubmit={handleCustomerLookup} className="app-lookup-form flex gap-2.5 max-w-xl mx-auto">
                 <input
                   type="text"
                   required
@@ -808,13 +737,6 @@ export default function App() {
                     className="inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
                   >
                     <Wrench className="w-4 h-4" /> {isStartingCustomerTicket ? 'Đang tạo phiếu...' : 'Tạo phiếu sửa chữa'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setSubmittedAppointment(null); setAppointmentError(''); setActiveTab('appointment'); }}
-                    className="inline-flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
-                  >
-                    <CalendarDays className="w-4 h-4" /> Đặt lịch hẹn
                   </button>
                 </div>
               </div>
@@ -914,150 +836,6 @@ export default function App() {
           </section>
         )}
 
-        {activeTab === 'appointment' && (
-          <section className="bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-slate-200/80 max-w-3xl mx-auto">
-            <button
-              type="button"
-              onClick={() => setActiveTab('lookup')}
-              className="mb-5 inline-flex items-center gap-2 text-sm font-medium text-slate-500 hover:text-blue-600 transition"
-            >
-              <ArrowRight className="w-4 h-4 rotate-180" /> Quay lại tra cứu
-            </button>
-
-            {submittedAppointment ? (
-              <div className="py-5 text-center">
-                <CheckCircle2 className="w-14 h-14 mx-auto text-emerald-500 mb-4" />
-                <h2 className="text-2xl font-bold text-slate-900">Đã gửi yêu cầu đặt lịch</h2>
-                <p className="text-sm text-slate-500 mt-2">Nhân viên sẽ liên hệ qua số điện thoại để xác nhận lịch hẹn.</p>
-                <div className="max-w-md mx-auto mt-6 rounded-xl bg-slate-50 border border-slate-200 p-5 text-left space-y-2 text-sm">
-                  <p><span className="text-slate-500">Mã hẹn:</span> <strong className="font-mono text-blue-700">{submittedAppointment.id}</strong></p>
-                  <p><span className="text-slate-500">Thời gian:</span> <strong>{submittedAppointment.time}, {new Date(`${submittedAppointment.date}T12:00:00`).toLocaleDateString('vi-VN')}</strong></p>
-                  <p><span className="text-slate-500">Dịch vụ:</span> <strong>{submittedAppointment.serviceType}</strong></p>
-                  <p><span className="text-slate-500">Trạng thái:</span> <strong className="text-amber-700">Chờ xác nhận</strong></p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSubmittedAppointment(null);
-                    setAppointmentForm({ customerName: '', phone: '', serviceType: serviceTypes[0], deviceName: '', date: '', time: '', issueDescription: '' });
-                  }}
-                  className="mt-6 border border-slate-300 hover:border-blue-500 hover:text-blue-600 font-semibold px-5 py-2.5 rounded-xl text-sm transition"
-                >
-                  Đặt lịch khác
-                </button>
-              </div>
-            ) : (
-              <>
-                <div className="mb-6">
-                  <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-                    <CalendarDays className="w-6 h-6 text-blue-600" /> Đặt lịch sửa chữa
-                  </h2>
-                  <p className="text-sm text-slate-500 mt-2">Gửi thông tin thiết bị và chọn thời gian bạn muốn mang máy đến.</p>
-                </div>
-
-                <form onSubmit={handleBookAppointment} className="space-y-4">
-                  {appointmentError && (
-                    <div className="p-3 bg-red-50 text-red-700 rounded-xl text-sm flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 flex-shrink-0" /> {appointmentError}
-                    </div>
-                  )}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Tên khách hàng</label>
-                      <input
-                        type="text"
-                        required
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition"
-                        placeholder="Nguyễn Văn A"
-                        value={appointmentForm.customerName}
-                        onChange={(e) => setAppointmentForm({ ...appointmentForm, customerName: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Số điện thoại</label>
-                      <input
-                        type="tel"
-                        required
-                        pattern="[0-9]{10,11}"
-                        title="Nhập số điện thoại gồm 10 hoặc 11 chữ số"
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition"
-                        placeholder="0912345678"
-                        value={appointmentForm.phone}
-                        onChange={(e) => setAppointmentForm({ ...appointmentForm, phone: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Dịch vụ cần hỗ trợ</label>
-                      <select
-                        required
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none bg-white transition"
-                        value={appointmentForm.serviceType}
-                        onChange={(e) => setAppointmentForm({ ...appointmentForm, serviceType: e.target.value })}
-                      >
-                        {serviceTypes.map((serviceType) => <option key={serviceType} value={serviceType}>{serviceType}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Thiết bị / Model</label>
-                      <input
-                        type="text"
-                        required
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition"
-                        placeholder="Laptop Dell, PC gaming..."
-                        value={appointmentForm.deviceName}
-                        onChange={(e) => setAppointmentForm({ ...appointmentForm, deviceName: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Ngày hẹn</label>
-                      <input
-                        type="date"
-                        required
-                        min={getLocalDateValue()}
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition"
-                        value={appointmentForm.date}
-                        onChange={(e) => setAppointmentForm({ ...appointmentForm, date: e.target.value })}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Khung giờ</label>
-                      <select
-                        required
-                        className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none bg-white transition"
-                        value={appointmentForm.time}
-                        onChange={(e) => setAppointmentForm({ ...appointmentForm, time: e.target.value })}
-                      >
-                        <option value="">Chọn khung giờ</option>
-                        {appointmentTimes.map((time) => <option key={time} value={time}>{time}</option>)}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Mô tả tình trạng thiết bị</label>
-                    <textarea
-                      rows="3"
-                      required
-                      className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition"
-                      placeholder="Mô tả ngắn lỗi hoặc nhu cầu sửa chữa..."
-                      value={appointmentForm.issueDescription}
-                      onChange={(e) => setAppointmentForm({ ...appointmentForm, issueDescription: e.target.value })}
-                    ></textarea>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={isSubmittingAppointment}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-xl flex items-center justify-center gap-2 transition shadow-sm shadow-blue-500/20"
-                  >
-                    <CalendarDays className="w-5 h-5" /> {isSubmittingAppointment ? 'Đang gửi...' : 'Gửi yêu cầu đặt lịch'}
-                  </button>
-                </form>
-              </>
-            )}
-          </section>
-        )}
-
         {/* 2. Tab Quét Camera QR */}
         {activeTab === 'scan' && (
           <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200/80 max-w-lg mx-auto text-center space-y-4">
@@ -1076,7 +854,7 @@ export default function App() {
           </div>
         )}
 
-        {/* 3. Tab Dashboard */}
+        {/* 3. Tab Quản Lý */}
         {activeTab === 'dashboard' && currentUser && (
           <div className="space-y-4">
             {ticketLoadError && !/404/i.test(ticketLoadError) && (
@@ -1084,73 +862,6 @@ export default function App() {
                 <AlertCircle className="w-4 h-4 flex-shrink-0" /> {ticketLoadError}
               </div>
             )}
-            <section className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
-              <div className="p-4 md:p-5 flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-slate-100">
-                <h2 className="font-bold text-slate-900 flex items-center gap-2">
-                  <CalendarDays className="w-5 h-5 text-blue-600" /> Lịch hẹn sửa chữa
-                </h2>
-                <span className="text-xs font-semibold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-full w-fit">
-                  {appointments.filter((appointment) => appointment.status === 'pending').length} chờ xác nhận
-                </span>
-              </div>
-              {appointmentError && (
-                <div className="m-4 p-3 bg-red-50 text-red-700 rounded-xl text-sm flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 flex-shrink-0" /> {appointmentError}
-                </div>
-              )}
-              {isLoadingAppointments ? (
-                <p className="p-6 text-sm text-slate-500">Đang tải lịch hẹn...</p>
-              ) : appointments.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[850px] text-left text-sm">
-                    <thead className="bg-slate-50/80 text-slate-600 font-semibold">
-                      <tr>
-                        <th className="p-3.5">Lịch hẹn</th>
-                        <th className="p-3.5">Khách hàng</th>
-                        <th className="p-3.5">Thiết bị / Dịch vụ</th>
-                        <th className="p-3.5">Tình trạng</th>
-                        <th className="p-3.5">Xác nhận</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {appointments.map((appointment) => (
-                        <tr key={appointment.id} className="align-top">
-                          <td className="p-3.5 whitespace-nowrap">
-                            <div className="font-semibold text-slate-800">{new Date(`${appointment.date}T12:00:00`).toLocaleDateString('vi-VN')}</div>
-                            <div className="text-xs text-slate-500 flex items-center gap-1 mt-1"><Clock3 className="w-3.5 h-3.5" /> {appointment.time}</div>
-                            <div className="font-mono text-[11px] text-blue-600 mt-1">{appointment.id || 'Chưa có mã'}</div>
-                          </td>
-                          <td className="p-3.5">
-                            <div className="font-semibold text-slate-800">{appointment.customerName}</div>
-                            <div className="text-xs text-slate-500 mt-1">{appointment.phone}</div>
-                          </td>
-                          <td className="p-3.5">
-                            <div className="font-medium text-slate-800">{appointment.deviceName}</div>
-                            <div className="text-xs text-slate-500 mt-1">{appointment.serviceType}</div>
-                          </td>
-                          <td className="p-3.5 max-w-xs text-xs text-slate-600">{appointment.issueDescription}</td>
-                          <td className="p-3.5">
-                            <select
-                              value={appointment.status}
-                              onChange={(e) => handleAppointmentStatusChange(appointment.id, e.target.value)}
-                              disabled={updatingAppointmentId === appointment.id}
-                              className="border border-slate-200 rounded-lg px-2.5 py-2 text-xs font-medium bg-white focus:border-blue-500 outline-none"
-                            >
-                              <option value="pending">Chờ xác nhận</option>
-                              <option value="confirmed">Đã xác nhận</option>
-                              <option value="cancelled">Đã hủy</option>
-                            </select>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="p-6 text-sm text-slate-500">Chưa có yêu cầu đặt lịch nào.</p>
-              )}
-            </section>
-
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm">
                 <p className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Tổng máy tiếp nhận</p>
@@ -1304,11 +1015,7 @@ export default function App() {
                     </div>
 
                     <div className="p-3 bg-white border border-slate-200 rounded-xl shadow-sm">
-                      <QRCodeSVG
-                        value={currentCreatedTicket.qrUrl}
-                        size={150}
-                        level="H"
-                      />
+                      <QRCodeSVG value={currentCreatedTicket.qrUrl} size={150} level="H" />
                     </div>
 
                     <div className="text-xs text-left w-full space-y-1.5 mt-3 text-slate-700">
@@ -1336,10 +1043,53 @@ export default function App() {
               ) : (
                 <div className="text-center p-8 text-slate-400">
                   <QrCode className="w-16 h-16 mx-auto mb-3 stroke-1 text-slate-300" />
-                  <p className="text-sm">Mã QR chứa đường dẫn form và Token do backend cấp sẽ hiển thị tại đây.</p>
+                  <p className="text-sm">Mã QR sẽ xuất hiện tại đây sau khi tạo phiếu.</p>
                 </div>
               )}
             </div>
+
+            <section className="md:col-span-2 bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-slate-200/80">
+              <h2 className="text-lg font-bold text-slate-900 mb-2">Lưu thiết bị trực tiếp</h2>
+              <p className="text-sm text-slate-500 mb-5">Tạo hồ sơ thiết bị cho khách hàng đã có trong hệ thống.</p>
+              {deviceCreationError && (
+                <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-xl text-sm flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" /> {deviceCreationError}
+                </div>
+              )}
+              <form onSubmit={handleCreateDevice} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <label className="block text-xs font-semibold text-slate-600 uppercase">
+                    Mã khách hàng
+                    <input type="number" min="1" required value={deviceForm.customerId} onChange={(e) => setDeviceForm({ ...deviceForm, customerId: e.target.value })} className="mt-1.5 w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm font-normal normal-case outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600 uppercase">
+                    Mã thiết bị
+                    <input type="text" required value={deviceForm.deviceCode} onChange={(e) => setDeviceForm({ ...deviceForm, deviceCode: e.target.value })} className="mt-1.5 w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm font-normal normal-case outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600 uppercase">
+                    Tên thiết bị
+                    <input type="text" required value={deviceForm.deviceName} onChange={(e) => setDeviceForm({ ...deviceForm, deviceName: e.target.value })} className="mt-1.5 w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm font-normal normal-case outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-600 uppercase">
+                    Serial / phiên bản
+                    <input type="text" required value={deviceForm.serialOrVersion} onChange={(e) => setDeviceForm({ ...deviceForm, serialOrVersion: e.target.value })} className="mt-1.5 w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm font-normal normal-case outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+                  </label>
+                </div>
+                <button type="submit" disabled={isCreatingDevice} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition">
+                  {isCreatingDevice ? 'Đang lưu thiết bị...' : 'Lưu thiết bị & tạo mã QR'}
+                </button>
+              </form>
+              {createdDevice && (
+                <div className="mt-5 flex flex-col sm:flex-row items-center gap-4 border-t border-slate-100 pt-5">
+                  {createdDevice.qrImage && <img src={getQrImageSource(createdDevice.qrImage)} alt="Mã QR thiết bị" className="w-36 h-36" />}
+                  <div className="text-sm space-y-1">
+                    <p className="font-semibold text-emerald-700">Đã lưu thiết bị thành công</p>
+                    <p>Mã thiết bị: <strong className="font-mono">{createdDevice.deviceCode}</strong></p>
+                    <p>ID: <strong>{createdDevice.id}</strong></p>
+                  </div>
+                </div>
+              )}
+            </section>
           </div>
         )}
 
@@ -1394,6 +1144,10 @@ export default function App() {
                   <input type="tel" required className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition" placeholder="0912345678" value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} />
                 </div>
                 <div>
+                  <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Email</label>
+                  <input type="email" className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition" placeholder="email@example.com" value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} />
+                </div>
+                <div>
                   <label className="block text-xs font-semibold text-slate-600 uppercase mb-1.5">Dịch vụ</label>
                   <select className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none bg-white transition" value={formData.serviceType} onChange={(e) => setFormData({ ...formData, serviceType: e.target.value })}>
                     {serviceTypes.map((serviceType) => <option key={serviceType} value={serviceType}>{serviceType}</option>)}
@@ -1435,7 +1189,7 @@ export default function App() {
                   <span className="font-mono font-bold text-blue-600 bg-blue-50 px-2.5 py-0.5 rounded-md text-sm">
                     {selectedTicket.id}
                   </span>
-                  {getStatusBadge(selectedTicket.status)}
+                  {!selectedTicket.isDeviceLookup && getStatusBadge(selectedTicket.status)}
                 </div>
                 <h3 className="text-2xl font-bold text-slate-900 mt-2">{selectedTicket.deviceName}</h3>
                 <p className="text-xs text-slate-500 mt-0.5">Khách: {selectedTicket.customerName} - {selectedTicket.phone}</p>
@@ -1455,6 +1209,14 @@ export default function App() {
               </div>
             )}
 
+            {selectedTicket.isDeviceLookup ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-5 text-sm space-y-2">
+                <h4 className="font-bold text-slate-800">Thông tin thiết bị</h4>
+                <p>Mã thiết bị: <strong className="font-mono">{selectedTicket.deviceCode || 'Không có'}</strong></p>
+                <p>ID thiết bị: <strong>{selectedTicket.id}</strong></p>
+              </div>
+            ) : (
+              <>
             <div>
               <h4 className="text-xs font-bold uppercase text-slate-500 tracking-wider mb-3.5">
                 Tiến Độ Sửa Chữa {currentUser ? '(Kỹ thuật viên nhấp để cập nhật)' : ''}
@@ -1506,6 +1268,8 @@ export default function App() {
                 )}
               </div>
             </div>
+              </>
+            )}
           </div>
         )}
 

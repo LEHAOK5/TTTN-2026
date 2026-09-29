@@ -26,19 +26,14 @@ export const authApi = {
   },
 };
 
-export const appointmentApi = {
-  getAllAppointments: async () => {
-    const response = await apiClient.get('/appointments');
+export const devicesApi = {
+  createDevice: async (deviceData) => {
+    const response = await apiClient.post('/devices', deviceData);
     return response.data;
   },
 
-  createAppointment: async (appointmentData) => {
-    const response = await apiClient.post('/appointments', appointmentData);
-    return response.data;
-  },
-
-  updateAppointment: async (id, data) => {
-    const response = await apiClient.patch(`/appointments/${id}`, data);
+  getDeviceByCode: async (deviceCode) => {
+    const response = await apiClient.get(`/devices/${encodeURIComponent(deviceCode)}`);
     return response.data;
   },
 };
@@ -56,19 +51,21 @@ export const ticketApi = {
     return response.data;
   },
 
-  verifyTicketToken: async ({ token, id }) => {
-    const verifyPath = import.meta.env.VITE_TICKET_VERIFY_PATH || '/tickets/verify-token';
-    const verifyMethod = (import.meta.env.VITE_TICKET_VERIFY_METHOD || 'GET').toUpperCase();
-    const params = { token, id };
-    const response = verifyMethod === 'POST'
-      ? await apiClient.post(verifyPath, params)
-      : await apiClient.get(verifyPath, { params });
+  initSession: async () => {
+    const response = await apiClient.post('/tickets/init-session');
     return response.data;
   },
 
-  submitTicketDetails: async (ticketData) => {
-    const submitPath = import.meta.env.VITE_TICKET_SUBMIT_PATH || '/tickets/submit';
-    const response = await apiClient.post(submitPath, ticketData);
+  verifyTicketToken: async (token) => {
+    const response = await apiClient.get(`/tickets/session/${encodeURIComponent(token)}`);
+    return response.data;
+  },
+
+  submitTicketDetails: async (token, ticketData) => {
+    const response = await apiClient.post(
+      `/tickets/session/${encodeURIComponent(token)}/submit`,
+      ticketData
+    );
     return response.data;
   },
 
